@@ -1,50 +1,83 @@
+DEFAULT_HOST!=../default-host.sh
+HOST?=DEFAULT_HOST
+HOSTARCH!=../target-triplet-to-arch.sh $(HOST)
 
-ASMC=i686-elf-as
-CC=i686-elf-gcc
-CFLAGS=-std=gnu99 -ffreestanding -O2 -Wall -Wextra
+CFLAGS?=-O2 -g
+CPPFLAGS?=
+LDFLAGS?=
+LIBS?=
 
-KERNEL_LD=linker.ld
+DESTDIR?=
+PREFIX?=/usr/local
+EXEC_PREFIX?=$(PREFIX)
+BOOTDIR?=$(EXEC_PREFIX)/boot
+INCLUDEDIR?=$(PREFIX)/include
 
+CFLAGS:=$(CFLAGS) -ffreestanding -Wall -Wextra
+CPPFLAGS:=$(CPPFLAGS) -D__is_kernel -Iinclude
+LDFLAGS:=$(LDFLAGS)
+LIBS:=$(LIBS) -nostdlib -lk -lgcc
 
+ARCHDIR=arch/$(HOSTARCH)
 
-all: ilux.bin multiboot_check create_bootable
+include $(ARCHDIR)/make.config
 
-%.o: %.s
-	$(ASMC) $^ -o $@
+CFLAGS:=$(CFLAGS) $(KERNEL_ARCH_CFLAGS)
+CPPFLAGS:=$(CPPFLAGS) $(KERNEL_ARCH_CPPFLAGS)
+LDFLAGS:=$(LDFLAGS) $(KERNEL_ARCH_LDFLAGS)
+LIBS:=$(LIBS) $(KERNEL_ARCH_LIBS)
 
-%.o: %.c
-	$(CC) -c $^ -o $@ $(CFLAGS)
+KERNEL_OBJS=\
+$(KERNEL_ARCH_OBJS) \
+kernel/kernel.o \
 
-ilux.bin: linker.ld boot.o kernel.o
-	$(CC) -T $< -o $@ -ffreestanding -O2 -nostdlib boot.o kernel.o -lgcc
+OBJS=\
+$(ARCHDIR)/crti.o \
+$(ARCHDIR)/crtbegin.o \
+$(KERNEL_OBJS) \
+$(ARCHDIR)/crtend.o \
+$(ARCHDIR)/crtn.o \
 
+LINK_LIST=\
+$(LDFLAGS) \
+$(ARCHDIR)/crti.o \
+$(ARCHDIR)/crtbegin.o \
+$(KERNEL_OBJS) \
+$(LIBS) \
+$(ARCHDIR)/crtend.o \
+$(ARCHDIR)/crtn.o \
 
-.PHONY: clean multiboot_check create_bootable
+.PHONY: all clean install install-headers install-kernel
+.SUFFIXES: .o .c .S
 
-multiboot_check: ilux.bin
-	@grub-file --is-x86-multiboot $^; \
-	if [ $$? -eq 0 ]; then \
-		echo "$^: valid Multiboot Version 1 header"; \
-	else \
-		(>&2 echo "$^: invalid Multiboot Version 1 header"); \
-		exit 1; \
-	fi \
+all: ilux.kernel
 
-	@grub-file --is-x86-multiboot2 $^; \
-	if [ $$? -eq 0 ]; then \
-		echo "$^: valid Multiboot Version 2 header"; \
-	else \
-		(>&2 echo "$^: invalid Multiboot Version 2 header"); \
-	fi \
+ilux.kernel: $(OBJS) $(ARCHDIR)/linker.ld
+	$(CC) -T $(ARCHDIR)/linker.ld -o $@ $(CFLAGS) $(LINK_LIST)
+	grub-file --is-x86-multiboot ilux.kernel
 
-create_bootable: ilux.bin multiboot_check
-	@mkdir -p isodir/boot/grub
-	@cp ilux.bin isodir/boot/ilux.bin
-	@cp grub.cfg isodir/boot/grub/grub.cfg
-	grub-mkrescue -o ilux.iso isodir > /dev/null 2>&1
+$(ARCHDIR)/crtbegin.o $(ARCHDIR)/crtend.o:
+	OBJ=`$(CC) $(CFLAGS) $(LDFLAGS) -print-file-name=$(@F)` && cp "$$OBJ" $@
+
+.c.o:
+	$(CC) -MD -c $< -o $@ -std=gnu11 $(CFLAGS) $(CPPFLAGS)
+
+.S.o:
+	$(CC) -MD -c $< -o $@ $(CFLAGS) $(CPPFLAGS)
 
 clean:
-	@rm -f *.o
-	@rm -f ilux.bin
-	@rm -f ilux.iso
-	@rm -rf isodir
+	rm -f ilux.kernel
+	rm -f $(OBJS) *.o */*.o */*/*.o
+	rm -f $(OBJS:.o=.d) *.d */*.d */*/*.d
+
+install: install-headers install-kernel
+
+install-headers:
+	mkdir -p $(DESTDIR)$(INCLUDEDIR)
+	cp -R --preserve=timestamps include/. $(DESTDIR)$(INCLUDEDIR)/.
+
+install-kernel: ilux.kernel
+	mkdir -p $(DESTDIR)$(BOOTDIR)
+	cp ilux.kernel $(DESTDIR)$(BOOTDIR)
+
+-include $(OBJS:.o=.d)
